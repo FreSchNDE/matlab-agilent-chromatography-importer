@@ -6,14 +6,14 @@ Three self-contained MATLAB functions that read the binary data files an Agilent
 |---|---|---|
 | `importAgilentUV` | `*.UV` (diode-array 3D UV/Vis) | absorbance matrix (retention time × wavelength) + metadata |
 | `importAgilentCH` | `*.CH` (single detector channel: DAD/MWD/ELSD/FID) | one signal trace over retention time + metadata |
-| `importAgilentMS` | `*.MS` (mass spectrometer) | TIC + ion-abundance matrix (retention time × m/z) + metadata |
+| `importAgilentMS` | `*.MS` (mass spectrometer) | TIC + ion-abundance matrix (retention time × m/z, optionally sparse) + metadata |
 | `describeFileContent` | the struct any of the above returns | a multiline `"structName.fieldName: value"` text summary |
 
 Each function is a single, dependency-free `.m` file, copy the one you need.
 
 ## Requirements
 
-- MATLAB **R2021a or newer** (uses `arguments` blocks and `name=value` call syntax). Written and testet in R2025b.
+- MATLAB **R2021a or newer** (uses `arguments` blocks and `name=value` call syntax). Written and tested in R2025b.
 - (Development) The optional reference unit tests need R with the [chromConverter](https://github.com/ethanbass/chromConverter) package.
 
 ## Usage
@@ -24,8 +24,13 @@ fileContent = importAgilentUV("path/to/DAD1.UV", ApplyScaling=false);  % raw cou
 
 fileContent = importAgilentCH("path/to/DAD1A.ch");
 fileContent = importAgilentMS("path/to/MSD1.MS");
-fileContent = importAgilentMS("path/to/MSD1.MS", Precision=1);  % m/z rounding
+fileContent = importAgilentMS("path/to/MSD1.MS", Precision=0);  % unit-mass m/z axis
+fileContent = importAgilentMS("path/to/MSD1.MS", Sparse=true);  % sparse ion-abundance matrix
 ```
+
+A mass spectrum only records the ions detected in each scan, so for full-scan data the ion-abundance matrix is usually well over 90% zeros.
+`Sparse=true` builds it directly as a sparse matrix, which takes a fraction of the memory (e.g. 9 MB instead of 107 MB); use `full()` for functions that don't accept sparse input.
+When `Precision` merges several ions of one scan into the same m/z, their abundances are summed.
 
 Every function returns a scalar struct with grouped metadata (`file`, `sample`, `method`, `instrument`, ...) and a `signal` group holding the data.
 All structs returned by the same function share one fixed field layout independent of file version, so you can build an array of them.
@@ -59,16 +64,16 @@ Only the versions produced by the instrument these were developed against are ve
 | `.MS` | `2` LC-MS | ✅ |
 |       | `2` GC-MS | untested |
 
-An unrecognised version raises an error.
+An unrecognized version raises an error.
 
 ## Development & Testing
 
 The test class `tests/TestImportAgilent.m` runs over every `.D` folder found
 under a dataset directory. It has two groups of checks:
 
-- **Self-contained** checks that need no external reference and run on any `.D`folder:
+- **Self-contained** checks that need no external reference and run on any `.D` folder:
 
-  Each file imports without error, all structs from one importer share a fixed schema (and concatenate into an array), field types are stable, the `.CH` header min/max match the decoded signal, and scaling is consistent.
+  Each file imports without error, all structs from one importer share a fixed schema (and concatenate into an array), field types are stable, the `.CH` header min/max match the decoded signal, scaling is consistent, the sparse `.MS` import matches the full one, and coarser m/z rounding keeps each scan's total abundance.
 - **Reference** checks that compare the decoded data bit-for-bit against chromConverter.
   These are automatically skipped (marked *incomplete*) if the reference files are not present.
 
@@ -95,12 +100,12 @@ Rscript generate_groundtruth.R  [datasetRoot]  [outputDir]
 ```
 
 - `datasetRoot` defaults to `../datasets`; pass your own folder to match `AGILENT_TEST_DATA`.
-- `outputDir` defaults to `<system temp>/ca_agilent_truth`, which the test reads automatically.
+- `outputDir` defaults to `<system temp>/agilent_importer_truth`, which the test reads automatically.
   Override with the `AGILENT_TEST_TRUTH` environment variable.
 
 Files whose version chromConverter cannot read are simply skipped.
 
-## Acknowledgements
+## Acknowledgments
 
 The binary-format knowledge and several decoder routines were derived from these open-source projects:
 

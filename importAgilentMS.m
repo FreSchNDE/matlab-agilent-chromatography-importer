@@ -4,6 +4,7 @@ function fileContent = importAgilentMS(filePath, options)
 % Syntax:
 %   fileContent = importAgilentMS(filePath)
 %   fileContent = importAgilentMS(filePath, Precision=2)
+%   fileContent = importAgilentMS(filePath, Sparse=true)
 %
 % Description:
 %   Reads a single mass-spectrometer data file (e.g. MSD1.MS) from an Agilent
@@ -26,7 +27,7 @@ function fileContent = importAgilentMS(filePath, options)
 %   sits at a different offset AND endianness (LC: big-endian at 0x118; GC:
 %   little-endian at 0x142), and their metadata strings live at different
 %   offsets. Reading an LC file with the GC offsets yields garbage, so the
-%   variant is detected rather than assumed; an unrecognised type string is a
+%   variant is detected rather than assumed; an unrecognized type string is a
 %   hard error. GC-MS support is implemented from documentation only, since no
 %   GC-MS files were available to test it; the sparse GC metadata reflects
 %   undocumented header fields, but the signal data should decode correctly.
@@ -43,6 +44,18 @@ function fileContent = importAgilentMS(filePath, options)
 % Name-Value Arguments:
 %   Precision - (1,1) double
 %       Number of decimal places the m/z axis is rounded to (default 3).
+%       Masses are stored in steps of 0.05, so the default keeps every
+%       stored mass distinct. With a coarser precision (e.g. 0 for unit
+%       mass), ions that round to the same m/z within one scan are merged
+%       and their abundances summed.
+%
+%   Sparse - (1,1) logical
+%       When true, return signal.xic as a sparse matrix (default false).
+%       A scan only records the ions that were detected, so for full-scan
+%       data the matrix is usually well over 90% zeros. The sparse matrix
+%       is built directly from the stored ions, so the full matrix never
+%       exists in memory. Not every MATLAB function accepts sparse input;
+%       use full() where one doesn't.
 %
 % Output Arguments:
 %   fileContent - (1,1) struct with the fields below. Every field is always present;
@@ -78,7 +91,8 @@ function fileContent = importAgilentMS(filePath, options)
 %           .retentionTime (:,1) double  minutes since start of run
 %           .mz            (1,:) double  mass-to-charge axis
 %           .tic           (:,1) double  total ion current (one per scan)
-%           .xic           (:,:) double  ion abundance (retentionTime x mz)
+%           .xic           (:,:) double  ion abundance (retentionTime x mz);
+%                                        sparse if Sparse=true
 %
 % This file is self-contained: the helper functions it uses (readAgilentString
 % and parseDateTimeText) are included below as local functions.
@@ -86,6 +100,7 @@ function fileContent = importAgilentMS(filePath, options)
 arguments
     filePath (1,1) string {mustBeFile}
     options.Precision (1,1) double {mustBeNonnegative, mustBeInteger} = 3
+    options.Sparse (1,1) logical = false
 end
 
 fileInfo = dir(filePath);
@@ -142,8 +157,8 @@ fseek(fid, 266, "bof");
 dataStart = fread(fid, 1, "uint16", 0, "b") * 2 - 2;
 
 % --- Walk the scan segments ----------------------------------------------
-[retentionTime, totalIntensity, mz, xic] = ...
-    readSpectra(fid, dataStart, nScans, fileInfo.bytes, options.Precision, filePath);
+[retentionTime, totalIntensity, mz, xic] = readSpectra(fid, dataStart, ...
+    nScans, fileInfo.bytes, options.Precision, options.Sparse, filePath);
 
 % --- Assemble output ------------------------------------------------------
 fileContent = struct();
@@ -215,7 +230,7 @@ elseif contains(fileType, "GC / MS", IgnoreCase=true) || contains(fileType, "GC/
         "numTimesEndian",  "l");
 else
     error("importAgilentMS:unknownVariant", ...
-        join(["Unrecognised .MS file-type string '%s' in %s. Expected" ...
+        join(["Unrecognized .MS file-type string '%s' in %s. Expected" ...
               "'MSD Spectral File' (LC-MS) or 'GC / MS Data File' (GC-MS)." ...
               "Refusing to guess, because LC and GC store the scan count at" ...
               "different offsets and endianness."]), fileType, filePath);
@@ -236,8 +251,8 @@ end
 end
 
 
-function [retentionTime, ticSignal, mzAxis, xic] = readSpectra(fid, dataStart, nScans, fileBytes, precision, filePath)
-%READSPECTRA Walk the scan segments and build a dense (scan x m/z) matrix.
+function [retentionTime, ticSignal, mzAxis, xic] = readSpectra(fid, dataStart, nScans, fileBytes, precision, asSparse, filePath)
+%READSPECTRA Walk the scan segments and build the (scan x m/z) abundance matrix.
 %   Segments are stored back to back from dataStart, so they are read
 %   sequentially rather than via the (LC-only) trailing scan directory. This
 %   is what rainbow does and works for both the LC and GC variants.
@@ -251,12 +266,20 @@ function [retentionTime, ticSignal, mzAxis, xic] = readSpectra(fid, dataStart, n
 %
 %   Masses are uint16 fixed-point scaled by 20 (m/z * 20, i.e. 0.05 m/z
 %   steps); abundances are a 14-bit mantissa with a 2-bit base-8 exponent.
+%
+%   The pairs are collected as a (scan, m/z, abundance) list and the matrix,
+%   full or sparse, is built from that list in one step. Both builders sum
+%   entries that share a scan and a rounded m/z.
 
 retentionTime = zeros(nScans, 1);
 ticSignal = zeros(nScans, 1);
-mzAll = [];
-abundanceAll = [];
 pairsPerScan = zeros(nScans, 1);
+
+% Each pair takes 4 bytes, so the data body bounds the total pair count.
+maxPairs = floor((fileBytes - dataStart) / 4);
+mzAll = zeros(maxPairs, 1);
+abundanceAll = zeros(maxPairs, 1);
+nRead = 0;
 
 position = dataStart;
 for i = 1:nScans
@@ -273,13 +296,16 @@ for i = 1:nScans
 
     retentionTime(i) = fread(fid, 1, "int32", 0, "b") / 60000;   % minutes
 
+    idx = nRead + (1:nPairs);
+
     % Mass values (uint16, with the 2-byte abundance interleaved).
     fseek(fid, position + 18, "bof");
-    mzAll(end+1:end+nPairs) = fread(fid, nPairs, "uint16", 2, "b");
+    mzAll(idx) = fread(fid, nPairs, "uint16", 2, "b");
 
     % Abundance values (uint16, interleaved with the masses).
     fseek(fid, position + 20, "bof");
-    abundanceAll(end+1:end+nPairs) = fread(fid, nPairs, "uint16", 2, "b");
+    abundanceAll(idx) = fread(fid, nPairs, "uint16", 2, "b");
+    nRead = nRead + nPairs;
 
     % TIC: the last int32 of the 10-byte segment footer.
     fseek(fid, position + segmentBytes - 4, "bof");
@@ -287,6 +313,8 @@ for i = 1:nScans
 
     position = position + segmentBytes;
 end
+mzAll = mzAll(1:nRead);
+abundanceAll = abundanceAll(1:nRead);
 
 % Decode abundance: 14-bit mantissa, 2-bit base-8 exponent.
 abundanceAll = bitand(abundanceAll, 16383, "uint16") .* ...
@@ -297,17 +325,16 @@ abundanceAll = bitand(abundanceAll, 16383, "uint16") .* ...
 mzAll = mzAll ./ 20;
 mzAll = round(mzAll .* 10^precision) ./ 10^precision;
 
-mzAxis = unique(mzAll, "sorted");
+[mzAxis, ~, cols] = unique(mzAll, "sorted");
+mzAxis = mzAxis.';
+rows = repelem((1:nScans)', pairsPerScan);
 
-% Map each scan's pairs into the dense matrix.
-stop = cumsum(pairsPerScan);
-start = [1; stop(1:end-1) + 1];
-
-xic = zeros(nScans, numel(mzAxis));
-[~, cols] = ismember(mzAll, mzAxis);
-for i = 1:nScans
-    idx = start(i):stop(i);
-    xic(i, cols(idx)) = abundanceAll(idx);
+% Summing (rather than assigning) keeps each scan's total abundance when a
+% coarse precision merges ions into one m/z.
+if asSparse
+    xic = sparse(rows, cols, abundanceAll, nScans, numel(mzAxis));
+else
+    xic = accumarray([rows, cols], abundanceAll, [nScans, numel(mzAxis)]);
 end
 
 end

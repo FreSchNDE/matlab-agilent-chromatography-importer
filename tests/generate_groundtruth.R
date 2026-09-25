@@ -16,7 +16,7 @@
 ## Usage (from a shell, with R + chromConverter installed):
 ##   Rscript generate_groundtruth.R [datasetRoot] [outputDir]
 ## Defaults: datasetRoot = ../datasets (relative to this script),
-##           outputDir   = <system temp>/ca_agilent_truth
+##           outputDir   = <system temp>/agilent_importer_truth
 ## The MATLAB test reads outputDir from the same default (or $AGILENT_TEST_TRUTH).
 
 ## If chromConverter was installed into a personal library that is not on the
@@ -36,7 +36,7 @@ get_script_dir <- function() {
 args <- commandArgs(trailingOnly = TRUE)
 script_dir  <- get_script_dir()
 datasetRoot <- if (length(args) >= 1) args[1] else file.path(script_dir, "..", "datasets")
-outdir      <- if (length(args) >= 2) args[2] else file.path(dirname(tempdir()), "ca_agilent_truth")
+outdir      <- if (length(args) >= 2) args[2] else file.path(dirname(tempdir()), "agilent_importer_truth")
 
 if (!dir.exists(datasetRoot)) {
   stop("Dataset root not found: ", normalizePath(datasetRoot, mustWork = FALSE),

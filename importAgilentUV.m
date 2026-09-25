@@ -25,7 +25,7 @@ function fileContent = importAgilentUV(filePath, options)
 %     "31"         : legacy ChemStation, delta-encoded          [UNTESTED]
 %   Only 131_LC files were available to test; the "131_OL" (uncompressed
 %   doubles) and legacy "31" paths are implemented from the chromConverter /
-%   rainbow format references but are marked UNTESTED. An unrecognised version
+%   rainbow format references but are marked UNTESTED. An unrecognized version
 %   tag is a hard error.
 %
 %   The binary layout (header offsets, wavelength encoding, delta scheme and

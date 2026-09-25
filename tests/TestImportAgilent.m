@@ -9,7 +9,9 @@ classdef TestImportAgilent < matlab.unittest.TestCase
     %     run on ANY .D folder: each file imports without error, all structs
     %     from one importer share a fixed field layout (so they concatenate
     %     into an array), field types are stable, the .CH header min/max match
-    %     the decoded signal, and scaling is consistent.
+    %     the decoded signal, scaling is consistent, the sparse .MS import
+    %     matches the full one, and coarser m/z rounding keeps each scan's
+    %     total abundance.
     %
     %   * REFERENCE checks that compare the decoded data bit-for-bit against
     %     the CRAN chromConverter R package. These are skipped (marked
@@ -20,7 +22,7 @@ classdef TestImportAgilent < matlab.unittest.TestCase
     %   * Dataset folder: environment variable AGILENT_TEST_DATA, else the
     %     "datasets" folder next to the repo root.
     %   * Reference folder: environment variable AGILENT_TEST_TRUTH, else
-    %     <tempdir>/ca_agilent_truth (the default output of the R script).
+    %     <tempdir>/agilent_importer_truth (the default output of the R script).
     %
     % Run with:  runtests("tests")   or   runtests("tests/TestImportAgilent.m")
 
@@ -56,7 +58,7 @@ classdef TestImportAgilent < matlab.unittest.TestCase
 
             td = string(getenv("AGILENT_TEST_TRUTH"));
             if td == ""
-                td = fullfile(tempdir, "ca_agilent_truth");
+                td = fullfile(tempdir, "agilent_importer_truth");
             end
             testCase.TruthDir = td;
         end
@@ -124,6 +126,40 @@ classdef TestImportAgilent < matlab.unittest.TestCase
                     "m/z axis is not sorted-unique.");
             end
             testCase.verifyFixedSchema(structs, "MS");
+        end
+
+        function msSparseMatchesFull(testCase)
+            % Sparse=true must change only how signal.xic is stored.
+            files = testCase.filesWithExt("MS");
+            testCase.assumeNotEmpty(files, "No .MS files found.");
+            for i = 1:numel(files)
+                ms = importAgilentMS(files(i).path);
+                sp = importAgilentMS(files(i).path, Sparse=true);
+                testCase.verifyTrue(issparse(sp.signal.xic), ...
+                    "xic is not sparse for " + files(i).path);
+                testCase.verifyTrue(TestImportAgilent.canConcat({ms, sp}), ...
+                    "Sparse and full structs do not concatenate for " + files(i).path);
+                sp.signal.xic = full(sp.signal.xic);
+                testCase.verifyTrue(isequaln(sp, ms), ...
+                    "Sparse import differs from the full import for " + files(i).path);
+            end
+        end
+
+        function msCoarsePrecisionKeepsScanTotals(testCase)
+            % Rounding m/z more coarsely merges ions within a scan. Their
+            % abundances must be summed, not overwritten, so each scan keeps
+            % its total abundance. Checked for both matrix builders.
+            files = testCase.filesWithExt("MS");
+            testCase.assumeNotEmpty(files, "No .MS files found.");
+            for i = 1:numel(files)
+                ref = importAgilentMS(files(i).path);
+                p0Full = importAgilentMS(files(i).path, Precision=0);
+                p0Sparse = importAgilentMS(files(i).path, Precision=0, Sparse=true);
+                testCase.verifyEqual(sum(p0Full.signal.xic, 2), sum(ref.signal.xic, 2), ...
+                    "Precision=0 changes per-scan totals (full) for " + files(i).path);
+                testCase.verifyEqual(full(sum(p0Sparse.signal.xic, 2)), sum(ref.signal.xic, 2), ...
+                    "Precision=0 changes per-scan totals (sparse) for " + files(i).path);
+            end
         end
     end
 
@@ -208,12 +244,13 @@ classdef TestImportAgilent < matlab.unittest.TestCase
             % version code path runs and returns the same fixed schema.
             files = testCase.filesWithExt("ch");
             testCase.assumeNotEmpty(files, "No .CH files found.");
+            tmp = testCase.applyFixture(matlab.unittest.fixtures.TemporaryFolderFixture);
             ref = "";
             for ver = ["8" "30" "81" "130" "179" "181"]
-                relabelled = TestImportAgilent.relabelVersion(files(1).path, ver);
+                relabeled = TestImportAgilent.relabelVersion(files(1).path, ver, tmp.Folder);
                 w = warning("off", "importAgilentCH:minMaxMismatch");
                 cleanup = onCleanup(@() warning(w));
-                s = importAgilentCH(relabelled);
+                s = importAgilentCH(relabeled);
                 clear cleanup
                 sig = TestImportAgilent.schemaSig(s);
                 if ref == "", ref = sig; end
@@ -227,12 +264,13 @@ classdef TestImportAgilent < matlab.unittest.TestCase
             % decodes the same data body.
             files = testCase.filesWithExt("MS");
             testCase.assumeNotEmpty(files, "No .MS files found.");
-            [gcPath, lcPath] = TestImportAgilent.relabelMsGc(files(1).path);
+            tmp = testCase.applyFixture(matlab.unittest.fixtures.TemporaryFolderFixture);
+            [gcPath, lcPath] = TestImportAgilent.relabelMsGc(files(1).path, tmp.Folder);
             gc = importAgilentMS(gcPath);
             lc = importAgilentMS(lcPath);
             testCase.verifyEqual(gc.file.type, "GC / MS Data File");
             testCase.verifyEqual(gc.signal.xic, lc.signal.xic, ...
-                "GC-relabelled file decodes a different body than the LC original.");
+                "GC-relabeled file decodes a different body than the LC original.");
         end
     end
 
@@ -292,16 +330,16 @@ classdef TestImportAgilent < matlab.unittest.TestCase
             end
         end
 
-        function out = relabelVersion(srcPath, ver)
+        function out = relabelVersion(srcPath, ver, folder)
             raw = TestImportAgilent.readBytes(srcPath);
             v = char(ver);
             raw(1) = numel(v);
             raw(2:1+numel(v)) = uint8(v);
-            out = fullfile(tempdir, "ca_ch_v" + ver + ".ch");
+            out = fullfile(folder, "relabeled_v" + ver + ".ch");
             TestImportAgilent.writeBytes(out, raw);
         end
 
-        function [gcPath, lcPath] = relabelMsGc(srcPath)
+        function [gcPath, lcPath] = relabelMsGc(srcPath, folder)
             raw = TestImportAgilent.readBytes(srcPath);
             % LC scan count: uint16 big-endian at 0x118 (bytes 281..282, 1-based).
             nScans = double(raw(281))*256 + double(raw(282));
@@ -311,9 +349,9 @@ classdef TestImportAgilent < matlab.unittest.TestCase
             label = uint8('GC / MS Data File');
             raw(5) = numel(label);
             raw(6:5+numel(label)) = label;
-            gcPath = fullfile(tempdir, "ca_ms_GC.MS");
+            gcPath = fullfile(folder, "relabeled_GC.MS");
             TestImportAgilent.writeBytes(gcPath, raw);
-            lcPath = fullfile(tempdir, "ca_ms_LCref.MS");
+            lcPath = fullfile(folder, "original_LC.MS");
             copyfile(srcPath, lcPath);
         end
 

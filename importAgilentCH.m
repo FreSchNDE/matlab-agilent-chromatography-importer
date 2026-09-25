@@ -35,7 +35,7 @@ function fileContent = importAgilentCH(filePath, options)
 %   implemented from the chromConverter R package and rainbow project format
 %   references and are marked UNTESTED; their decoders (double-delta and
 %   double-array) and header offsets were ported but not verified against real
-%   files. An unrecognised version tag is a hard error.
+%   files. An unrecognized version tag is a hard error.
 %
 %   Version 179 has two sub-forms selected from the file-type code at offset
 %   347 and, for GC files, the software name: OpenLab ("OL") and the "Mustang"
